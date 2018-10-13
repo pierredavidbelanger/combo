@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"github.com/nsf/termbox-go"
+	"github.com/urfave/cli"
 	"math"
 	"os"
 	"os/exec"
@@ -11,15 +12,60 @@ import (
 
 func main() {
 
-	if len(os.Args) < 2 || (len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help")) {
-		fmt.Fprintf(os.Stderr, "usage: %s command [args...]\n", os.Args[0])
-		os.Exit(3)
+	app := cli.NewApp()
+	app.Name = "combo"
+	app.HelpName = os.Args[0]
+	app.Usage = "terminal combo widget"
+	app.Version = "v1.0.0"
+	app.Writer = os.Stderr
+	app.ErrWriter = app.Writer
+
+	app.Flags = []cli.Flag{
+		cli.BoolFlag{
+			Name:  "callback, c",
+			Usage: "callback the command with the last selected item as argument after the selection",
+		},
+		cli.BoolFlag{
+			Name:  "append, a",
+			Usage: "callback the command with all the last selected items as arguments (valid only when --callback is enabled)",
+		},
+		cli.StringFlag{
+			Name:  "separator, s",
+			Usage: "separator to use when appending selected items as arguments (valid only when --append is enabled)",
+		},
+		cli.BoolFlag{
+			Name:  "force, f",
+			Usage: "force a selection, does not allow free text",
+		},
 	}
 
-	out, err := pickUI()
+	app.Action = mainAction
+
+	err := app.Run(os.Args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(2)
+	}
+
+}
+
+func mainAction(c *cli.Context) error {
+
+	if !c.Bool("c") && c.Bool("a") {
+		return fmt.Errorf("--append is valid only if --callback is enabled")
+	}
+
+	if !c.Bool("a") && c.String("s") != "" {
+		return fmt.Errorf("--separator is valid only if --append is enabled")
+	}
+
+	if !c.Args().Present() {
+		return fmt.Errorf("a command is required")
+	}
+
+	out, err := pickUI(c)
+	if err != nil {
+		return err
 	}
 
 	if out == "" {
@@ -28,9 +74,11 @@ func main() {
 
 	fmt.Fprintf(os.Stdout, "%s", out)
 	os.Exit(0)
+
+	return nil
 }
 
-func pickUI() (string, error) {
+func pickUI(c *cli.Context) (string, error) {
 
 	err := termbox.Init()
 	if err != nil {
@@ -46,16 +94,27 @@ func pickUI() (string, error) {
 	termbox.SetInputMode(termbox.InputEsc)
 	termbox.SetOutputMode(termbox.OutputNormal)
 
-	return pickLoop()
+	return pickLoop(c)
 }
 
-func pickLoop() (string, error) {
+func pickLoop(c *cli.Context) (string, error) {
 
 	lastOut := ""
 
-	cmd := os.Args[1:]
+	var cmdBase = c.Args()
+	var cmdArgs []string
 
 	for {
+
+		var cmd []string
+		cmd = append(cmd, cmdBase...)
+		if len(cmdArgs) != 0 {
+			if c.String("s") != "" {
+				cmd = append(cmd, strings.Join(cmdArgs, c.String("s")))
+			} else {
+				cmd = append(cmd, cmdArgs...)
+			}
+		}
 
 		items, err := run(cmd)
 		if err != nil {
@@ -65,7 +124,7 @@ func pickLoop() (string, error) {
 			return lastOut, nil
 		}
 
-		out, err := pick(cmd, items)
+		out, err := pick(c, cmd, items)
 		if err != nil {
 			return "", err
 		}
@@ -73,13 +132,20 @@ func pickLoop() (string, error) {
 			return "", err
 		}
 
+		if !c.Bool("c") {
+			return out, nil
+		}
+
 		lastOut = out
 
-		cmd = append(cmd, out)
+		if !c.Bool("a") {
+			cmdArgs = nil
+		}
+		cmdArgs = append(cmdArgs, out)
 	}
 }
 
-func pick(cmd, allItems []string) (string, error) {
+func pick(c *cli.Context, cmd, allItems []string) (string, error) {
 
 	input := ""
 	sel := -1
@@ -150,10 +216,12 @@ func pick(cmd, allItems []string) (string, error) {
 				} else if ev.Key == termbox.KeyEnter {
 
 					if sel >= 0 {
-						return allItems[sel], nil
+						return items[sel], nil
 					}
 
-					return input, nil
+					if !c.Bool("f") {
+						return input, nil
+					}
 
 				} else if ev.Key == termbox.KeySpace {
 
@@ -229,7 +297,7 @@ func run(cmd []string) ([]string, error) {
 
 	out, err := exec.Command(name, args...).Output()
 	if err != nil {
-		return nil, fmt.Errorf("%s: %v", name, err)
+		return nil, fmt.Errorf("%s %v: %v", name, args, err)
 	}
 
 	var lines []string
